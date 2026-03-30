@@ -17,6 +17,8 @@ import fitz  # PyMuPDF
 from ebooklib import epub
 
 
+FOOTNOTE_MARKER_RE = re.compile(r'^(\d+|[*†‡§¶])[.\)]\s+(.+)$', re.DOTALL)
+
 PAGE_NUMBER_PATTERNS = [
     re.compile(r'^\d+$'),                          # Plain number: 42
     re.compile(r'^[-–—]\s*\d+\s*[-–—]$'),         # Dashes: - 42 -
@@ -310,6 +312,53 @@ def classify_block(block_dict, body_size):
     return "p"
 
 
+def is_footnote_block(block, page_height, body_size):
+    """
+    Return True if this block looks like a footnote:
+    - Located in the bottom 20% of the page
+    - Smaller font than body text
+    - Text starts with a numbered or symbolic marker (e.g. '1. ', '* ')
+    """
+    if block["bbox"][1] < page_height * 0.80:
+        return False
+    spans = [s for line in block["lines"] for s in line["spans"]]
+    if not spans:
+        return False
+    avg_size = sum(s["size"] for s in spans) / len(spans)
+    if avg_size >= body_size * 0.88:
+        return False
+    text = " ".join(s["text"] for s in spans).strip()
+    return bool(FOOTNOTE_MARKER_RE.match(text))
+
+
+def is_footnote_continuation(block, page_height, body_size):
+    """
+    Return True if this block is a continuation of a footnote (bottom of page,
+    small font, but no leading marker).
+    """
+    if block["bbox"][1] < page_height * 0.80:
+        return False
+    spans = [s for line in block["lines"] for s in line["spans"]]
+    if not spans:
+        return False
+    avg_size = sum(s["size"] for s in spans) / len(spans)
+    return avg_size < body_size * 0.88
+
+
+def parse_footnote_block(block):
+    """
+    Extract (marker, text) from a footnote block.
+    Returns None if the block doesn't match the expected pattern.
+    """
+    text = " ".join(
+        s["text"] for line in block["lines"] for s in line["spans"]
+    ).strip()
+    m = FOOTNOTE_MARKER_RE.match(text)
+    if not m:
+        return None
+    return m.group(1), m.group(2).strip()
+
+
 def get_pdf_outline(doc):
     """
     Return the PDF's built-in bookmark/outline as a list of
@@ -346,43 +395,76 @@ def extract_content(doc, skip_pages=None):
 
     has_outline = bool(outline)
     content = []
+    footnotes = []  # list of {"marker": str, "text": str}
 
     for page_num, page in enumerate(doc):
         if page_num in skip_pages:
             continue
 
-        # Inject outline heading at the start of each chapter/section page
+        page_height = page.rect.height
+
+        # --- First pass: split blocks into footnotes vs body ---
+        fn_blocks = []
+        body_blocks = []
+        last_was_fn = False
+
+        for block in page.get_text("dict")["blocks"]:
+            if block["type"] != 0:
+                continue
+            raw = " ".join(s["text"] for line in block["lines"] for s in line["spans"]).strip()
+            if not raw or is_page_number(raw):
+                continue
+            if is_footnote_block(block, page_height, body_size):
+                fn_blocks.append(block)
+                last_was_fn = True
+            elif last_was_fn and is_footnote_continuation(block, page_height, body_size):
+                fn_blocks.append(block)
+            else:
+                body_blocks.append(block)
+                last_was_fn = False
+
+        # Parse footnotes and build marker set for this page
+        page_fn_markers = set()
+        for fn_block in fn_blocks:
+            parsed = parse_footnote_block(fn_block)
+            if parsed:
+                marker, text = parsed
+                footnotes.append({"marker": marker, "text": text})
+                page_fn_markers.add(marker)
+            elif footnotes:
+                # Continuation: append to the last footnote's text
+                extra = " ".join(
+                    s["text"] for line in fn_block["lines"] for s in line["spans"]
+                ).strip()
+                if extra:
+                    footnotes[-1]["text"] += " " + extra
+
+        # --- Second pass: extract body content ---
         if page_num in outline_by_page:
             entry = outline_by_page[page_num]
             block_type = "h1" if entry["level"] == 1 else "h2"
             content.append({"type": block_type, "text": entry["title"]})
 
-        for block in page.get_text("dict")["blocks"]:
-            if block["type"] != 0:
-                continue
-
+        for block in body_blocks:
             raw_text = " ".join(
                 s["text"] for line in block["lines"] for s in line["spans"]
             ).strip()
 
-            if not raw_text or is_page_number(raw_text):
+            if not raw_text:
                 continue
 
             block_type = classify_block(block, body_size)
 
             if has_outline:
                 if block_type in ("h1", "h2") and page_num in outline_by_page:
-                    # Skip font-detected headings on outline pages — the outline
-                    # title already represents this heading
                     ol_title = outline_by_page[page_num]["title"].lower()
                     if raw_text.lower() in ol_title or ol_title in raw_text.lower():
                         continue
-                # Outline is authoritative for h1; demote any font-detected h1s
                 if block_type == "h1":
                     block_type = "h2"
 
             if block_type == "p":
-                html = spans_to_html(block)
+                html = spans_to_html(block, body_size=body_size, fn_markers=page_fn_markers)
                 if html:
                     content.append({"type": "p", "text": raw_text, "html": html})
             else:
@@ -390,7 +472,7 @@ def extract_content(doc, skip_pages=None):
                 if text:
                     content.append({"type": block_type, "text": text})
 
-    return content, has_outline
+    return content, has_outline, footnotes
 
 
 def reconstruct_lines(block_text):
@@ -442,10 +524,11 @@ def is_italic_span(span):
     return bool(span["flags"] & 2) or "italic" in span["font"].lower() or "oblique" in span["font"].lower()
 
 
-def spans_to_html(block_dict):
+def spans_to_html(block_dict, body_size=None, fn_markers=None):
     """
     Convert a block's spans to an HTML string with inline bold/italic preserved.
     Handles line-break reconstruction (hyphen joins, mid-sentence continuations).
+    Superscript spans matching footnote markers are rendered as endnote links.
     """
     lines = block_dict["lines"]
 
@@ -454,10 +537,16 @@ def spans_to_html(block_dict):
     for i, line in enumerate(lines):
         spans = line["spans"]
         for j, span in enumerate(spans):
+            size = span.get("size", 0)
+            flags = span.get("flags", 0)
+            super_ = (body_size and size < body_size * 0.75) or bool(flags & 1)
             flat.append({
                 "text":    span["text"],
                 "bold":    is_bold_span(span),
                 "italic":  is_italic_span(span),
+                "size":    size,
+                "flags":   flags,
+                "super":   super_,
                 "line_end": j == len(spans) - 1 and i < len(lines) - 1,
             })
 
@@ -481,7 +570,7 @@ def spans_to_html(block_dict):
         text = span["text"]
         if not text:
             continue
-        if merged and merged[-1]["bold"] == span["bold"] and merged[-1]["italic"] == span["italic"]:
+        if merged and merged[-1]["bold"] == span["bold"] and merged[-1]["italic"] == span["italic"] and merged[-1]["super"] == span["super"]:
             merged[-1] = {**merged[-1], "text": merged[-1]["text"] + text}
         else:
             merged.append(dict(span))
@@ -489,8 +578,18 @@ def spans_to_html(block_dict):
     # Render to HTML
     parts = []
     for span in merged:
-        t = html_escape(span["text"])
-        if span["bold"] and span["italic"]:
+        t = html_escape(span["text"].strip()) if span["text"].strip() else html_escape(span["text"])
+        raw = span["text"].strip()
+
+        # Use pre-computed super field (re-computing from size/flags is wrong after merging)
+        is_super = span.get("super", False)
+
+        if is_super and fn_markers and raw in fn_markers:
+            # Link to endnote anchor
+            t = f'<a href="#fn-{html_escape(raw)}" epub:type="noteref"><sup>{html_escape(raw)}</sup></a>'
+        elif is_super:
+            t = f"<sup>{t}</sup>"
+        elif span["bold"] and span["italic"]:
             t = f"<strong><em>{t}</em></strong>"
         elif span["bold"]:
             t = f"<strong>{t}</strong>"
@@ -559,7 +658,30 @@ def make_chapter_html(chapter_title, blocks, book_title):
 </html>""").encode("utf-8")
 
 
-def build_epub(content, title, author, cover_png, output_path):
+def make_endnotes_html(footnotes):
+    items = []
+    for fn in footnotes:
+        m = html_escape(fn["marker"])
+        t = html_escape(fn["text"])
+        items.append(
+            f'<p id="fn-{m}" style="margin:0 0 0.8em 0;">'
+            f'<sup><a href="#fnref-{m}">{m}</a></sup> {t}</p>'
+        )
+    body = "\n".join(items)
+    return (f"""<?xml version='1.0' encoding='utf-8'?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <title>Notes</title>
+  <style>body {{ font-family: serif; line-height: 1.6; margin: 1.5em; }}</style>
+</head>
+<body>
+<h1 style="text-align:center;font-weight:bold;margin:1.5em 0 0.5em 0;">Notes</h1>
+{body}
+</body>
+</html>""").encode("utf-8")
+
+
+def build_epub(content, title, author, cover_png, output_path, footnotes=None):
     book = epub.EpubBook()
     book.set_title(title or "Untitled")
     book.set_language("en")
@@ -581,7 +703,16 @@ def build_epub(content, title, author, cover_png, output_path):
         book.add_item(epub_chap)
         epub_chapters.append(epub_chap)
 
-    book.toc = [epub.Link(c.file_name, c.title, c.file_name) for c in epub_chapters]
+    toc_items = [epub.Link(c.file_name, c.title, c.file_name) for c in epub_chapters]
+
+    if footnotes:
+        notes_chap = epub.EpubHtml(title="Notes", file_name="endnotes.xhtml", lang="en")
+        notes_chap.content = make_endnotes_html(footnotes)
+        book.add_item(notes_chap)
+        epub_chapters.append(notes_chap)
+        toc_items.append(epub.Link("endnotes.xhtml", "Notes", "endnotes"))
+
+    book.toc = toc_items
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
     book.spine = ["cover", "nav"] + epub_chapters
@@ -659,15 +790,16 @@ def main():
     cover_png = render_cover(doc, title_page_idx)
 
     print("Extracting and formatting text...")
-    content, used_outline = extract_content(doc, skip_pages={title_page_idx})
+    content, used_outline, footnotes = extract_content(doc, skip_pages={title_page_idx})
     headings = sum(1 for c in content if c["type"] != "p")
     chapters = sum(1 for c in content if c["type"] == "h1")
     chapter_source = "PDF outline" if used_outline else "font heuristics"
     print(f"  {len(content)} blocks ({chapters} chapters, {headings - chapters} subheadings, {len(content) - headings} paragraphs)")
     print(f"  Chapter detection: {chapter_source}")
+    print(f"  Footnotes found: {len(footnotes)}")
 
     print(f"Writing {output_path.name}...")
-    build_epub(content, title, author, cover_png, output_path)
+    build_epub(content, title, author, cover_png, output_path, footnotes=footnotes or None)
 
     print(f"Done -> {output_path}")
 

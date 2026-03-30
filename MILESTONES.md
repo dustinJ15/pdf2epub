@@ -16,7 +16,11 @@
   - Detects via both span flags and font name (covers generators that skip flags)
   - Handles hyphen line-wrap and mid-sentence line-break reconstruction at span level
   - Merges adjacent same-formatted spans before rendering
-- [ ] **Footnote → endnote conversion** — detect floating footnote blocks at page bottoms, match them to their in-text references, and reformat as endnotes in the EPUB.
+- [x] **Footnote → endnote conversion** — detect floating footnote blocks at page bottoms, match them to their in-text references, and reformat as endnotes in the EPUB.
+  - Footnote blocks identified by position (bottom 20% of page), smaller font, and numeric/symbol marker pattern
+  - In-text superscript markers linked to endnote anchors via `epub:type="noteref"`
+  - Endnotes rendered as a separate "Notes" chapter at end of EPUB with back-links
+  - Continuation blocks (footnotes spanning page breaks) collected and merged
 - [ ] **Multi-language OCR** — auto-detect document language and pass it to Tesseract for more accurate OCR on non-English scans.
 - [ ] **Batch mode** — accept a directory or glob pattern and convert multiple PDFs in one run.
 
