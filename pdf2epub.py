@@ -382,15 +382,13 @@ def extract_content(doc, skip_pages=None):
                     block_type = "h2"
 
             if block_type == "p":
-                plain = " ".join(
-                    s["text"] for line in block["lines"] for s in line["spans"]
-                )
-                text = reconstruct_lines(plain)
+                html = spans_to_html(block)
+                if html:
+                    content.append({"type": "p", "text": raw_text, "html": html})
             else:
                 text = re.sub(r'\s+', ' ', raw_text)
-
-            if text:
-                content.append({"type": block_type, "text": text})
+                if text:
+                    content.append({"type": block_type, "text": text})
 
     return content, has_outline
 
@@ -437,16 +435,83 @@ def render_cover(doc, page_idx=0):
     return pix.tobytes("png")
 
 
+def is_bold_span(span):
+    return bool(span["flags"] & 16) or "bold" in span["font"].lower()
+
+def is_italic_span(span):
+    return bool(span["flags"] & 2) or "italic" in span["font"].lower() or "oblique" in span["font"].lower()
+
+
+def spans_to_html(block_dict):
+    """
+    Convert a block's spans to an HTML string with inline bold/italic preserved.
+    Handles line-break reconstruction (hyphen joins, mid-sentence continuations).
+    """
+    lines = block_dict["lines"]
+
+    # Flatten spans, tagging the last span of each non-final line as a line-end
+    flat = []
+    for i, line in enumerate(lines):
+        spans = line["spans"]
+        for j, span in enumerate(spans):
+            flat.append({
+                "text":    span["text"],
+                "bold":    is_bold_span(span),
+                "italic":  is_italic_span(span),
+                "line_end": j == len(spans) - 1 and i < len(lines) - 1,
+            })
+
+    # Reconstruct line breaks
+    processed = []
+    for span in flat:
+        if span["line_end"]:
+            stripped = span["text"].rstrip()
+            if stripped.endswith("-"):
+                # Hyphenated wrap — drop hyphen, join directly
+                processed.append({**span, "text": stripped[:-1], "line_end": False})
+            else:
+                # Soft wrap — add a space
+                processed.append({**span, "text": stripped + " ", "line_end": False})
+        else:
+            processed.append(span)
+
+    # Merge adjacent spans with identical formatting
+    merged = []
+    for span in processed:
+        text = span["text"]
+        if not text:
+            continue
+        if merged and merged[-1]["bold"] == span["bold"] and merged[-1]["italic"] == span["italic"]:
+            merged[-1] = {**merged[-1], "text": merged[-1]["text"] + text}
+        else:
+            merged.append(dict(span))
+
+    # Render to HTML
+    parts = []
+    for span in merged:
+        t = html_escape(span["text"])
+        if span["bold"] and span["italic"]:
+            t = f"<strong><em>{t}</em></strong>"
+        elif span["bold"]:
+            t = f"<strong>{t}</strong>"
+        elif span["italic"]:
+            t = f"<em>{t}</em>"
+        parts.append(t)
+
+    return "".join(parts).strip()
+
+
 HEADING_STYLE = "text-align:center;font-weight:bold;margin:1.5em 0 0.5em 0;"
 PARA_STYLE = "text-indent:1.5em;margin:0 0 0.6em 0;"
 
 def render_block(item):
-    t = html_escape(item["text"])
     if item["type"] == "h1":
-        return f'<h1 style="{HEADING_STYLE}font-size:1.4em;">{t}</h1>'
+        return f'<h1 style="{HEADING_STYLE}font-size:1.4em;">{html_escape(item["text"])}</h1>'
     if item["type"] == "h2":
-        return f'<h2 style="{HEADING_STYLE}font-size:1.15em;">{t}</h2>'
-    return f'<p style="{PARA_STYLE}">{t}</p>'
+        return f'<h2 style="{HEADING_STYLE}font-size:1.15em;">{html_escape(item["text"])}</h2>'
+    # Paragraphs: use pre-rendered HTML (preserves bold/italic) if available
+    body = item.get("html") or html_escape(item["text"])
+    return f'<p style="{PARA_STYLE}">{body}</p>'
 
 
 def split_into_chapters(content, book_title):

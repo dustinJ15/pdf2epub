@@ -12,7 +12,10 @@
   - Font-detected h1s demoted to h2 when outline is authoritative
   - Duplicate suppression for blocks matching injected outline titles
   - Reports detection method in output: "PDF outline" vs "font heuristics"
-- [ ] **Inline bold/italic preservation** — detect bold/italic spans within body paragraphs and wrap them in `<strong>`/`<em>` rather than stripping formatting.
+- [x] **Inline bold/italic preservation** — detect bold/italic spans within body paragraphs and wrap them in `<strong>`/`<em>` rather than stripping formatting.
+  - Detects via both span flags and font name (covers generators that skip flags)
+  - Handles hyphen line-wrap and mid-sentence line-break reconstruction at span level
+  - Merges adjacent same-formatted spans before rendering
 - [ ] **Footnote → endnote conversion** — detect floating footnote blocks at page bottoms, match them to their in-text references, and reformat as endnotes in the EPUB.
 - [ ] **Multi-language OCR** — auto-detect document language and pass it to Tesseract for more accurate OCR on non-English scans.
 - [ ] **Batch mode** — accept a directory or glob pattern and convert multiple PDFs in one run.
