@@ -2,10 +2,14 @@
 """pdf2epub - Convert PDF to clean, reflowable EPUB."""
 
 import argparse
+import json
 import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
+import urllib.request
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -142,7 +146,83 @@ def metadata_from_title_page(doc):
     return candidate_title, author, page_idx
 
 
-def get_metadata(doc, path, title_override=None, author_override=None):
+def looks_like_title_fragment(author_candidate):
+    """
+    Return True if the 'author' looks like it might actually be part of the
+    title (e.g. 'DICK' when title is 'MOBY') — single word, no spaces.
+    """
+    words = author_candidate.strip().split()
+    return len(words) == 1
+
+
+def normalize_for_search(text):
+    """Lowercase, strip punctuation, collapse whitespace."""
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def word_overlap_score(candidate, reference):
+    """Fraction of candidate words found in reference words."""
+    c_words = set(normalize_for_search(candidate).split())
+    r_words = set(normalize_for_search(reference).split())
+    if not c_words:
+        return 0.0
+    return len(c_words & r_words) / len(c_words)
+
+
+def _ol_search(query, timeout=8):
+    """Execute a single Open Library search and return docs list."""
+    params = urllib.parse.urlencode({
+        "q": query,
+        "limit": 3,
+        "fields": "title,author_name",
+    })
+    url = f"https://openlibrary.org/search.json?{params}"
+    req = urllib.request.Request(url, headers={"User-Agent": "pdf2epub/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read()).get("docs", [])
+
+
+def query_open_library(title_candidate, author_candidate="", alt_title=""):
+    """
+    Search Open Library for canonical title and author.
+    Tries multiple query strategies and returns the first confident match.
+    Returns (title, author, source) or ("", "", "") if no confident match.
+    """
+    # Build a prioritised list of queries to try
+    queries = []
+
+    # If author looks like a title fragment, fold it in
+    if author_candidate and looks_like_title_fragment(author_candidate):
+        queries.append(f"{title_candidate} {author_candidate}")
+
+    queries.append(title_candidate)
+
+    # Also try the alternate title (e.g. PDF metadata) if it's more informative
+    if alt_title and alt_title.lower() != title_candidate.lower():
+        queries.append(alt_title)
+
+    for query in queries:
+        if not query.strip():
+            continue
+        try:
+            docs = _ol_search(query)
+        except Exception:
+            continue
+
+        for doc in docs:
+            ol_title = doc.get("title", "")
+            ol_authors = doc.get("author_name", [])
+            ol_author = ol_authors[0] if ol_authors else ""
+
+            if word_overlap_score(query, ol_title) >= 0.5:
+                return ol_title, ol_author, "Open Library"
+
+    return "", "", ""
+
+
+def get_metadata(doc, path, title_override=None, author_override=None, offline=False):
     # 1. Find the title page and extract title/author from it
     title, author, title_page_idx = metadata_from_title_page(doc)
 
@@ -161,13 +241,27 @@ def get_metadata(doc, path, title_override=None, author_override=None):
     if not title:
         title = title_from_filename(path)
 
-    # 4. Apply user overrides last
+    # 4. Verify and improve with Open Library
+    # Pass pdf_meta_title as an alt query in case title page detection got a fragment
+    pdf_meta_title = doc.metadata.get("title", "").strip().rstrip(";:,").strip()
+    metadata_source = "local detection"
+    if not offline and title:
+        ol_title, ol_author, ol_source = query_open_library(title, author, alt_title=pdf_meta_title)
+        if ol_title:
+            title = ol_title
+            if ol_author:
+                author = ol_author
+            metadata_source = ol_source
+
+    # 5. Apply user overrides last
     if title_override:
         title = title_override
+        metadata_source = "override"
     if author_override:
         author = author_override
+        metadata_source = "override"
 
-    return title, author, title_page_idx
+    return title, author, title_page_idx, metadata_source
 
 
 def detect_body_font_size(doc):
@@ -420,6 +514,7 @@ def main():
     parser.add_argument("-o", "--output", help="Output EPUB path (default: same name as input)")
     parser.add_argument("--title", help="Override detected title")
     parser.add_argument("--author", help="Override detected author")
+    parser.add_argument("--offline", action="store_true", help="Skip Open Library metadata lookup")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -438,9 +533,13 @@ def main():
         doc.close()
         doc = fitz.open(str(ocr_tmp))
 
-    title, author, title_page_idx = get_metadata(doc, input_path, args.title, args.author)
+    print("Fetching metadata...")
+    title, author, title_page_idx, meta_source = get_metadata(
+        doc, input_path, args.title, args.author, offline=args.offline
+    )
     print(f"  Title:  {title or '(not detected)'}")
     print(f"  Author: {author or '(not detected)'}")
+    print(f"  Source: {meta_source}")
     print(f"  Title page detected at page {title_page_idx + 1}")
 
     print("Rendering cover...")

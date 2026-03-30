@@ -4,7 +4,9 @@
 
 ## Backlog
 
-- [ ] **Open Library API metadata lookup** — query openlibrary.org with the detected title candidate to get canonical title, author, and other metadata. Fall back to local detection if no confident match.
+- [x] **Open Library API metadata lookup** — query openlibrary.org with the detected title candidate to get canonical title, author, and other metadata. Fall back to local detection if no confident match.
+  - Tries multiple query strategies (title+author fragment, title alone, PDF metadata as alt)
+  - `--offline` flag to skip the lookup entirely
 - [ ] **PDF outline/bookmark-based chapter detection** — use `doc.get_toc()` to read the PDF's built-in bookmark tree for chapter titles and page numbers. Fall back to font heuristics only if no outline exists.
 - [ ] **Inline bold/italic preservation** — detect bold/italic spans within body paragraphs and wrap them in `<strong>`/`<em>` rather than stripping formatting.
 - [ ] **Footnote → endnote conversion** — detect floating footnote blocks at page bottoms, match them to their in-text references, and reformat as endnotes in the EPUB.
