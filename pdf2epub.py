@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -309,15 +310,52 @@ def classify_block(block_dict, body_size):
     return "p"
 
 
+def get_pdf_outline(doc):
+    """
+    Return the PDF's built-in bookmark/outline as a list of
+    {"level": int, "title": str, "page": int (0-indexed)} dicts.
+    Returns empty list if the PDF has no outline.
+    """
+    return [
+        {"level": level, "title": title.strip(), "page": max(0, page - 1)}
+        for level, title, page in doc.get_toc()
+        if title.strip()
+    ]
+
+
 def extract_content(doc, skip_pages=None):
-    """Extract structured content (headings + paragraphs) from the PDF."""
+    """
+    Extract structured content (headings + paragraphs) from the PDF.
+
+    Chapter detection strategy:
+    - If the PDF has a built-in outline (bookmarks), use it as the authoritative
+      source for h1/h2 headings. Inject outline titles at their start pages and
+      suppress duplicate font-detected headings on those pages.
+    - If no outline exists, fall back to font-size heuristics for all headings.
+    """
     skip_pages = skip_pages or set()
     body_size = detect_body_font_size(doc)
+    outline = get_pdf_outline(doc)
+
+    # Build page -> outline entry lookup (one entry per page, most prominent level)
+    outline_by_page = {}
+    for entry in outline:
+        page = entry["page"]
+        if page not in outline_by_page or entry["level"] < outline_by_page[page]["level"]:
+            outline_by_page[page] = entry
+
+    has_outline = bool(outline)
     content = []
 
     for page_num, page in enumerate(doc):
         if page_num in skip_pages:
             continue
+
+        # Inject outline heading at the start of each chapter/section page
+        if page_num in outline_by_page:
+            entry = outline_by_page[page_num]
+            block_type = "h1" if entry["level"] == 1 else "h2"
+            content.append({"type": block_type, "text": entry["title"]})
 
         for block in page.get_text("dict")["blocks"]:
             if block["type"] != 0:
@@ -332,7 +370,17 @@ def extract_content(doc, skip_pages=None):
 
             block_type = classify_block(block, body_size)
 
-            # Paragraphs need line reconstruction; headings are already short
+            if has_outline:
+                if block_type in ("h1", "h2") and page_num in outline_by_page:
+                    # Skip font-detected headings on outline pages — the outline
+                    # title already represents this heading
+                    ol_title = outline_by_page[page_num]["title"].lower()
+                    if raw_text.lower() in ol_title or ol_title in raw_text.lower():
+                        continue
+                # Outline is authoritative for h1; demote any font-detected h1s
+                if block_type == "h1":
+                    block_type = "h2"
+
             if block_type == "p":
                 plain = " ".join(
                     s["text"] for line in block["lines"] for s in line["spans"]
@@ -344,7 +392,7 @@ def extract_content(doc, skip_pages=None):
             if text:
                 content.append({"type": block_type, "text": text})
 
-    return content
+    return content, has_outline
 
 
 def reconstruct_lines(block_text):
@@ -546,10 +594,12 @@ def main():
     cover_png = render_cover(doc, title_page_idx)
 
     print("Extracting and formatting text...")
-    content = extract_content(doc, skip_pages={title_page_idx})
+    content, used_outline = extract_content(doc, skip_pages={title_page_idx})
     headings = sum(1 for c in content if c["type"] != "p")
     chapters = sum(1 for c in content if c["type"] == "h1")
+    chapter_source = "PDF outline" if used_outline else "font heuristics"
     print(f"  {len(content)} blocks ({chapters} chapters, {headings - chapters} subheadings, {len(content) - headings} paragraphs)")
+    print(f"  Chapter detection: {chapter_source}")
 
     print(f"Writing {output_path.name}...")
     build_epub(content, title, author, cover_png, output_path)
