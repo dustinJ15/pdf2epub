@@ -298,7 +298,7 @@ def classify_block(block_dict, body_size):
     text = " ".join(s["text"] for s in spans).strip()
     word_count = len(text.split())
 
-    if word_count > 12:
+    if word_count == 0 or word_count > 12:
         return "p"
 
     max_size = max(s["size"] for s in spans)
