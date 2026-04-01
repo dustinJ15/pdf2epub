@@ -3,14 +3,12 @@
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 import tempfile
 import urllib.parse
 import urllib.request
-from difflib import SequenceMatcher
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -72,7 +70,7 @@ def score_title_page(page):
     max_size = max(s for s, _ in spans)
     total_words = sum(len(t.split()) for _, t in spans)
     longest_block_words = max(
-        (len(" ".join(s["text"] for l in b["lines"] for s in l["spans"]).split())
+        (len(" ".join(s["text"] for ln in b["lines"] for s in ln["spans"]).split())
          for b in page.get_text("dict")["blocks"] if b["type"] == 0),
         default=0,
     )

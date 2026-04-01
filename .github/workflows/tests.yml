@@ -20,7 +20,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pymupdf ebooklib pytest
+          pip install -r requirements.txt
 
-      - name: Run tests
-        run: pytest test_pdf2epub.py -v
+      - name: Lint
+        run: ruff check pdf2epub.py
+
+      - name: Run tests with coverage
+        run: pytest test_pdf2epub.py -v --cov=pdf2epub --cov-report=term-missing

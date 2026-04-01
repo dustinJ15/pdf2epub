@@ -1,0 +1,9 @@
+# Runtime
+PyMuPDF==1.27.2.2
+EbookLib==0.20
+ocrmypdf==16.11.0
+
+# Development / testing
+pytest==9.0.2
+pytest-cov==7.1.0
+ruff==0.15.8
