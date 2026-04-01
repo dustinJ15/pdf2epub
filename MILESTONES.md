@@ -21,8 +21,8 @@
   - In-text superscript markers linked to endnote anchors via `epub:type="noteref"`
   - Endnotes rendered as a separate "Notes" chapter at end of EPUB with back-links
   - Continuation blocks (footnotes spanning page breaks) collected and merged
-- [ ] **Multi-language OCR** — auto-detect document language and pass it to Tesseract for more accurate OCR on non-English scans.
-- [ ] **Batch mode** — accept a directory or glob pattern and convert multiple PDFs in one run.
+- [x] **Multi-language OCR** — pass `--language` flag to Tesseract for non-English scans (e.g. `--language fra`, `--language eng+fra`). Defaults to `eng`.
+- [x] **Batch mode** — `--batch` flag accepts a directory, converts all PDFs found, reports per-file success/failure, and continues on errors.
 
 ## Completed
 

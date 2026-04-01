@@ -727,18 +727,20 @@ def is_text_based(doc, sample_pages=5, min_chars_per_page=100):
     return (total_chars / pages_to_check) >= min_chars_per_page
 
 
-def ocr_pdf(input_path):
+def ocr_pdf(input_path, language=None):
     """
     Run ocrmypdf on a scanned PDF and return a Path to the OCR'd temp file.
     Caller is responsible for deleting it when done.
+    language: Tesseract language code(s), e.g. "eng", "fra", "eng+fra".
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     tmp.close()
     tmp_path = Path(tmp.name)
 
-    print("  Scanned PDF detected — running OCR (this may take a minute)...")
+    lang = language or "eng"
+    print(f"  Scanned PDF detected — running OCR (language: {lang}, this may take a minute)...")
     result = subprocess.run(
-        ["ocrmypdf", "--force-ocr", "--quiet", str(input_path), str(tmp_path)],
+        ["ocrmypdf", "--force-ocr", "--quiet", "--language", lang, str(input_path), str(tmp_path)],
         capture_output=True,
         text=True,
     )
@@ -750,39 +752,26 @@ def ocr_pdf(input_path):
     return tmp_path
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Convert a PDF to a clean, reflowable EPUB."
-    )
-    parser.add_argument("input", help="Input PDF file")
-    parser.add_argument("-o", "--output", help="Output EPUB path (default: same name as input)")
-    parser.add_argument("--title", help="Override detected title")
-    parser.add_argument("--author", help="Override detected author")
-    parser.add_argument("--offline", action="store_true", help="Skip Open Library metadata lookup")
-    args = parser.parse_args()
-
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"Error: '{input_path}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    output_path = Path(args.output) if args.output else input_path.with_suffix(".epub")
+def convert_one(input_path, output_path=None, title=None, author=None, offline=False, language=None):
+    """Convert a single PDF to EPUB. Returns the output path on success."""
+    input_path = Path(input_path)
+    output_path = Path(output_path) if output_path else input_path.with_suffix(".epub")
 
     print(f"Reading {input_path.name}...")
     doc = fitz.open(str(input_path))
     ocr_tmp = None
 
     if not is_text_based(doc):
-        ocr_tmp = ocr_pdf(input_path)
+        ocr_tmp = ocr_pdf(input_path, language=language)
         doc.close()
         doc = fitz.open(str(ocr_tmp))
 
     print("Fetching metadata...")
-    title, author, title_page_idx, meta_source = get_metadata(
-        doc, input_path, args.title, args.author, offline=args.offline
+    title_val, author_val, title_page_idx, meta_source = get_metadata(
+        doc, input_path, title, author, offline=offline
     )
-    print(f"  Title:  {title or '(not detected)'}")
-    print(f"  Author: {author or '(not detected)'}")
+    print(f"  Title:  {title_val or '(not detected)'}")
+    print(f"  Author: {author_val or '(not detected)'}")
     print(f"  Source: {meta_source}")
     print(f"  Title page detected at page {title_page_idx + 1}")
 
@@ -799,12 +788,64 @@ def main():
     print(f"  Footnotes found: {len(footnotes)}")
 
     print(f"Writing {output_path.name}...")
-    build_epub(content, title, author, cover_png, output_path, footnotes=footnotes or None)
+    build_epub(content, title_val, author_val, cover_png, output_path, footnotes=footnotes or None)
 
     print(f"Done -> {output_path}")
 
     if ocr_tmp:
         ocr_tmp.unlink(missing_ok=True)
+
+    return output_path
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert a PDF to a clean, reflowable EPUB."
+    )
+    parser.add_argument("input", help="Input PDF file or directory (with --batch)")
+    parser.add_argument("-o", "--output", help="Output EPUB path (single file) or directory (batch)")
+    parser.add_argument("--title", help="Override detected title (single file only)")
+    parser.add_argument("--author", help="Override detected author (single file only)")
+    parser.add_argument("--offline", action="store_true", help="Skip Open Library metadata lookup")
+    parser.add_argument("--language", default="eng",
+                        help="Tesseract language code(s) for OCR, e.g. eng, fra, eng+fra (default: eng)")
+    parser.add_argument("--batch", action="store_true",
+                        help="Convert all PDFs in a directory; input must be a directory path")
+    args = parser.parse_args()
+
+    if args.batch:
+        input_dir = Path(args.input)
+        if not input_dir.is_dir():
+            print(f"Error: '{input_dir}' is not a directory.", file=sys.stderr)
+            sys.exit(1)
+        pdfs = sorted(input_dir.glob("*.pdf"))
+        if not pdfs:
+            print(f"No PDF files found in '{input_dir}'.", file=sys.stderr)
+            sys.exit(1)
+        out_dir = Path(args.output) if args.output else input_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Batch mode: {len(pdfs)} PDF(s) found in '{input_dir}'")
+        failed = []
+        for i, pdf in enumerate(pdfs, 1):
+            print(f"\n[{i}/{len(pdfs)}] {pdf.name}")
+            try:
+                convert_one(pdf, output_path=out_dir / pdf.with_suffix(".epub").name,
+                            offline=args.offline, language=args.language)
+            except Exception as exc:
+                print(f"  ERROR: {exc}", file=sys.stderr)
+                failed.append(pdf.name)
+        print(f"\nBatch complete. {len(pdfs) - len(failed)}/{len(pdfs)} succeeded.")
+        if failed:
+            print("Failed:", ", ".join(failed), file=sys.stderr)
+            sys.exit(1)
+    else:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            print(f"Error: '{input_path}' not found.", file=sys.stderr)
+            sys.exit(1)
+        convert_one(input_path, output_path=args.output,
+                    title=args.title, author=args.author,
+                    offline=args.offline, language=args.language)
 
 
 if __name__ == "__main__":

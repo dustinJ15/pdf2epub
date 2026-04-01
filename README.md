@@ -10,11 +10,15 @@ Scanned (image-based) PDFs are handled automatically via OCR.
 
 - **Reflowable text** — resize fonts and change reading settings on your Kindle
 - **Auto OCR** — detects scanned PDFs and runs OCR automatically before converting
-- **Smart metadata detection** — finds the title and author from the title page using font size analysis, falls back to PDF metadata and filename
-- **Chapter & heading detection** — identifies chapters and section headings by font size and style; generates a clickable table of contents
+- **Multi-language OCR** — pass `--language` to use any Tesseract language pack (French, German, Japanese, etc.)
+- **Smart metadata detection** — finds title and author from the title page; verifies against Open Library for canonical names
+- **Chapter & heading detection** — uses embedded PDF bookmarks when available; falls back to font-size heuristics
+- **Inline formatting** — preserves bold and italic emphasis within paragraphs
+- **Footnote → endnote conversion** — detects page-bottom footnotes and reformats them as a linked Notes section
 - **Cover image** — renders the detected title page as the cover
 - **Page number stripping** — removes standalone page numbers from the output
 - **Paragraph reconstruction** — rejoins lines that were broken mid-sentence by PDF formatting
+- **Batch mode** — convert an entire folder of PDFs in one command
 
 ## Installation
 
@@ -47,15 +51,18 @@ Output is saved as `input.epub` in the same directory.
 **Options:**
 
 ```
-python3 pdf2epub.py input.pdf [options]
+python3 pdf2epub.py input [options]
 
 positional arguments:
-  input                 Input PDF file
+  input                 Input PDF file, or directory when using --batch
 
 options:
-  -o, --output PATH     Output EPUB path (default: same name as input)
-  --title TEXT          Override detected title
-  --author TEXT         Override detected author
+  -o, --output PATH     Output EPUB path (single file) or output directory (batch)
+  --title TEXT          Override detected title (single file only)
+  --author TEXT         Override detected author (single file only)
+  --offline             Skip Open Library metadata lookup
+  --language CODE       Tesseract language for OCR, e.g. eng, fra, eng+fra (default: eng)
+  --batch               Convert all PDFs in a directory
 ```
 
 **Examples:**
@@ -69,6 +76,15 @@ python3 pdf2epub.py my-book.pdf -o ~/Books/my-book.epub
 
 # Override metadata
 python3 pdf2epub.py my-book.pdf --title "My Book" --author "Jane Doe"
+
+# French-language scanned PDF
+python3 pdf2epub.py french-novel.pdf --language fra
+
+# Bilingual OCR
+python3 pdf2epub.py bilingual.pdf --language eng+fra
+
+# Convert every PDF in a folder
+python3 pdf2epub.py ~/Downloads/books/ --batch -o ~/Books/
 ```
 
 ## How It Works
